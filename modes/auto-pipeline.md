@@ -50,6 +50,8 @@ The evaluation inherits `oferta`'s bounded research budget. Company, compensatio
 Save the full evaluation in `reports/{###}-{company-slug}-{YYYY-MM-DD}.md` (see format in `modes/oferta.md`).
 Include Block G in the saved report. Add **URL:** {url} and **Legitimacy:** {tier} to the report header.
 
+**Script verification:** After saving, verify the file exists. If missing, recreate from evaluation output.
+
 ## Step 3 — Generate PDF
 
 Read `config/profile.yml`. Check `cv.output_format`:
@@ -57,6 +59,8 @@ Read `config/profile.yml`. Check `cv.output_format`:
 - If `"latex"`, execute the full pipeline from `modes/latex.md`
 - If `"text"`, execute the full pipeline from `modes/text.md`
 - Otherwise (default), execute the full pipeline from `modes/pdf.md`
+
+**Retry logic:** If PDF generation fails, retry up to 3 times with 2-second delays between attempts.
 
 ## Step 4 — Draft Application Answers (only if score >= 4.5)
 
@@ -98,4 +102,123 @@ If the final score is >= 4.5, generate a draft of responses for the application 
 
 Record it in `data/applications.md` with all columns including Report and PDF as ✅.
 
-**If any step fails**, continue with the next ones and mark the failed step as pending in the tracker.
+**Retry logic:** If tracker update fails, retry once before manual construction.
+
+## Checkpoint Files
+
+**Checkpoint files** are created after each major step to track progress and enable resumability. They are stored in `batch/pipeline-checkpoints/` and deleted when the full pipeline completes successfully.
+
+### Checkpoint Files Created:
+
+| Step | File | Contents | Purpose |
+|------|------|----------|---------|
+| After Step 0.5 | `checkpoint-05-liveness.txt` | `PASSED` or `FAILED` with reason | Verifies posting is live before evaluation |
+| After Step 0.6 | `checkpoint-06-blacklist.txt` | `PASSED` or `FAILED` with reason | Verifies company not on blacklist |
+| After Step 1 | `checkpoint-01-evaluation.txt` | `PASSED` with score, or `FAILED` | Verifies evaluation completed |
+| After Step 2 | `checkpoint-02-report.txt` | `PASSED` with report path, or `FAILED` | Verifies report saved |
+| After Step 3 | `checkpoint-03-pdf.txt` | `PASSED` with PDF path, or `FAILED` | Verifies PDF generated |
+| After Step 4 | `checkpoint-04-answers.txt` | `PASSED` or `SKIPPED` (score < 4.5) | Verifies application answers drafted |
+| After Step 5 | `checkpoint-05-tracker.txt` | `PASSED` with tracker row, or `FAILED` | Verifies tracker updated |
+
+### Checkpoint File Format:
+
+```
+STEP: 0.5
+NAME: Liveness Gate
+STATUS: PASSED
+TIMESTAMP: YYYY-MM-DD HH:MM:SS
+REASON: Posting is live - found active apply button
+```
+
+```
+STEP: 0.6
+NAME: Blacklist Gate
+STATUS: PASSED
+TIMESTAMP: YYYY-MM-DD HH:MM:SS
+REASON: Company not found on blacklist
+```
+
+```
+STEP: 1
+NAME: A-G Evaluation
+STATUS: FAILED
+TIMESTAMP: YYYY-MM-DD HH:MM:SS
+ERROR: Model timed out after 60s
+ATTEMPT: 1/3
+```
+
+### Resumability:
+
+If the pipeline is interrupted (AI session ends, model error, network issue), check for checkpoint files:
+
+```bash
+# List all checkpoint files
+ls -la batch/pipeline-checkpoints/
+
+# Read a specific checkpoint
+cat batch/pipeline-checkpoints/checkpoint-01-evaluation.txt
+```
+
+The checkpoint files tell you exactly which step completed, so you can resume from there instead of starting over.
+
+### Cleanup:
+
+Run `node normalize-statuses.mjs` to clean up stale checkpoint files older than 7 days.
+
+## Post-Pipeline Verification (MANDATORY)
+
+**Before finishing, you MUST verify each step completed successfully:**
+
+### Checkpoint 1: Report Saved
+- Verify `reports/{###}-{company-slug}-{YYYY-MM-DD}.md` exists
+- If missing, recreate the report from the evaluation output and save it
+- **Always**: Run `node reserve-report-num.mjs` to allocate the report number atomically
+- **Always**: Run `node reserve-report-num.mjs --release {###}` after saving to release the sentinel
+
+### Checkpoint 2: PDF Generated
+- Verify `output/cv-candidate-{company-slug}-{YYYY-MM-DD}.pdf` exists
+- If missing, run `node generate-pdf.mjs` with the report path
+- If Playwright fails (common on free tier), generate HTML fallback and note it in the report
+- **Retry logic**: If PDF generation fails, retry up to 3 times with 2-second delays between attempts
+
+### Checkpoint 3: Tracker Updated
+- Verify `data/applications.md` has a new row for this entry
+- If missing, manually construct the TSV entry with:
+  - Tracker number (use next sequential number)
+  - Current date
+  - Company (end employer or `?` for agency-mediated)
+  - Role
+  - Score (average of block scores)
+  - Status: `Evaluated`
+  - PDF: `❌` or `✅` based on Checkpoint 2
+  - Report: `reports/{###}-{company-slug}-{YYYY-MM-DD}.md`
+  - Notes: include any pipeline-specific info
+- **Retry logic**: If tracker update fails, retry once before manual construction
+
+### Retry Logic for Failed Scripts:
+
+If any script fails (e.g., `node reserve-report-num.mjs`, `node generate-pdf.mjs`, `node set-status.mjs`):
+
+1. **Wait 2 seconds** before retry (rate limiting)
+2. **Retry once** - if it fails again, proceed with workaround
+3. **Document failures** in the report's **Warnings** section:
+   ```markdown
+   ## Warnings
+   
+   - [RETRY FAILED] reserve-report-num.mjs allocation failed after 2 attempts
+   - [RETRY FAILED] generate-pdf.mjs failed - HTML fallback generated
+   - [MANUAL] Tracker row manually constructed
+   ```
+
+### If Any Checkpoint Fails:
+1. Continue with the next checkpoint (forced continuation)
+2. Document ALL failures in the report's **Warnings** section
+3. After finishing all checkpoints, append **Final Status** to the report:
+   ```markdown
+   ## Final Status
+   
+   Pipeline completed with warnings - some steps required manual intervention.
+   Review before proceeding to next steps.
+   ```
+
+**Never skip the verification step.** Even if everything appears complete, do a final check to ensure the AI didn't forget to run a required script like `reserve-report-num.mjs` or `set-status.mjs`.
