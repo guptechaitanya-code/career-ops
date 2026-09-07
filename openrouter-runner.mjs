@@ -110,6 +110,54 @@ if (blacklistedModels.size > 0) {
 // 429 failure count per model — auto-blacklist after 3 consecutive 429s
 const rateLimitCounts = {};
 
+// Model-specific rate limiting — track last request time per model
+const MODEL_RATE_LIMITS = {
+  'google': { minDelay: 3000, burst: 3 },
+  'qwen': { minDelay: 2000, burst: 5 },
+  'openai': { minDelay: 2500, burst: 3 },
+  'meta-llama': { minDelay: 1500, burst: 6 },
+  default: { minDelay: 2000, burst: 4 }
+};
+
+const lastRequestTime = {};
+const requestCount = {};
+
+function getProvider(modelId) {
+  const parts = modelId.split('/');
+  return parts[0] || 'default';
+}
+
+function getDelayForModel(modelId) {
+  const provider = getProvider(modelId);
+  const config = MODEL_RATE_LIMITS[provider] || MODEL_RATE_LIMITS.default;
+  const now = Date.now();
+  const last = lastRequestTime[provider] || 0;
+  const elapsed = now - last;
+  
+  if (elapsed < config.minDelay * config.burst) {
+    const count = requestCount[provider] || 0;
+    if (count >= config.burst) {
+      return Math.max(100, config.minDelay - elapsed);
+    }
+  }
+  return 0;
+}
+
+function recordRequest(modelId) {
+  const provider = getProvider(modelId);
+  lastRequestTime[provider] = Date.now();
+  requestCount[provider] = (requestCount[provider] || 0) + 1;
+}
+
+function resetRequestCount(provider) {
+  const config = MODEL_RATE_LIMITS[provider] || MODEL_RATE_LIMITS.default;
+  const now = Date.now();
+  const last = lastRequestTime[provider] || 0;
+  if (now - last > config.minDelay * config.burst) {
+    requestCount[provider] = 0;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Fetch free models from OpenRouter API
 // ---------------------------------------------------------------------------
@@ -288,6 +336,14 @@ async function callOpenRouter(systemPrompt, userMessage) {
   for (let attempt = 0; attempt < active.length; attempt++) {
     const model = active[(modelIndex % active.length + attempt) % active.length];
     activeModel = model;
+    
+    // Apply model-specific rate limiting delay
+    const delay = getDelayForModel(model);
+    if (delay > 0) {
+      console.log(`[rate-limit] Waiting ${(delay/1000).toFixed(1)}s for ${getProvider(model)} model cooldown...`);
+      await new Promise(r => setTimeout(r, delay));
+    }
+    
     process.stdout.write(`[model] ${model} ... `);
 
     try {
@@ -332,6 +388,10 @@ async function callOpenRouter(systemPrompt, userMessage) {
       if (!content) throw new Error('Empty response');
 
       const usage = normalizeOpenAIUsage(data.usage);
+      
+      // Record request for rate limiting
+      recordRequest(model);
+      resetRequestCount(getProvider(model));
 
       modelIndex = (modelIndex + attempt + 1) % active.length;
       console.log('OK');
@@ -355,9 +415,23 @@ async function callOpenRouter(systemPrompt, userMessage) {
           saveBlacklist(blacklistedModels);
           console.log(`SKIP (auto-blacklisted: persistent 429)`);
         } else {
-          console.log(`FAILED (HTTP 429 [${rateLimitCounts[model]}/3])`);
-          await new Promise(r => setTimeout(r, 800));
+          const baseDelay = 500;
+          const maxDelay = 60000;
+          const delay = Math.min(baseDelay * Math.pow(2, rateLimitCounts[model] - 1), maxDelay);
+          console.log(`RATE LIMIT [${rateLimitCounts[model]}/3] - retry in ${(delay/1000).toFixed(1)}s`);
+          await new Promise(r => setTimeout(r, delay));
         }
+      } else if (msg.includes('HTTP 401') || msg.includes('Invalid API key')) {
+        console.log(`SKIP (invalid API key)`);
+        blacklistedModels.add(model);
+        saveBlacklist(blacklistedModels);
+      } else if (msg.includes('HTTP 50') || msg.includes('internal server') || msg.includes('service unavailable')) {
+        const baseDelay = 500;
+        const maxDelay = 60000;
+        const retryCount = rateLimitCounts[model] ?? 0;
+        const delay = Math.min(baseDelay * Math.pow(2, retryCount), maxDelay);
+        console.log(`SERVER ERROR - retry in ${(delay/1000).toFixed(1)}s`);
+        await new Promise(r => setTimeout(r, delay));
       } else {
         console.log(`FAILED (${msg})`);
         await new Promise(r => setTimeout(r, 800));
