@@ -753,3 +753,39 @@ If — and only if — the user **explicitly stated a role-specific desired numb
 ```
 
 Never infer a desired number from the JD, the score, or past conversations. The profile default (`config/profile.yml` → `compensation.target_range`) needs no line — `salary-gap.mjs` reads it as the fallback. The advertised figure also needs no line: the report's `advertised_comp` **is** the advertised observation.
+---
+
+## Self-Review (MANDATORY)
+
+**After generating all blocks A-G, you MUST verify:**
+
+### Checkpoint: All 7 Blocks Present
+Verify each block (A through G) is present in the report with expected content:
+
+| Block | Required Elements |
+|-------|-------------------|
+| A | Archetype, domain, function, seniority, remote, team size, culture screen, TL;DR |
+| B | Requirement table with 5 columns, gaps section with mitigation strategies |
+| C | Level detected, sell senior plan, downlevel plan |
+| D | Company type, compensation reliability, HR verification questions (if applicable) |
+| E | Top 5 CV changes, top 5 LinkedIn changes |
+| F | 6-10 STAR+R stories mapped to JD requirements |
+| G | 14 signals analyzed (posting freshness, description quality, company signals, etc.) |
+
+### Checkpoint: Required Sections
+Verify the report contains:
+- `## Machine Summary` with YAML schema (including `advertised_comp`, `risk_summary`, `requirement_importance`)
+- `## Job Description (archived verbatim)` with full JD text or pointer to `jds/` file
+- Report header with URL, legitimacy tier, score, work auth status
+
+### Checkpoint: Final Status
+If any verification fails, document in a **Warnings** section:
+```markdown
+## Warnings
+
+- [FAILED] Block X incomplete or missing
+- [FAILED] Machine Summary missing required fields
+- [FAILED] JD not archived
+```
+
+**Never finish the evaluation without completing this self-review step.** Even if everything appears complete, do a final verification to ensure no block was accidentally skipped or truncated.
